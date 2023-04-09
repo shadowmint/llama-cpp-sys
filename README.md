@@ -1,6 +1,8 @@
 # llama-sys
 
-This is a trivial proof-of-concept binding of llama.cpp for rust.
+This is a binding of llama.cpp for rust.
+
+For a higher-level API, see https://github.com/shadowmint/llama-rs
 
 ## Build
 
