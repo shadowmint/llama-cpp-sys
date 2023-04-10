@@ -1,8 +1,8 @@
-# llama-sys
+# llama-cpp-sys
 
-This is a binding of llama.cpp for rust.
+This is a binding of [llama.cpp](https://github.com/ggerganov/llama.cpp) for rust.
 
-For a higher-level API, see https://github.com/shadowmint/llama-rs
+For a higher-level API, see https://github.com/shadowmint/llama-cpp-rs
 
 ## Build
 

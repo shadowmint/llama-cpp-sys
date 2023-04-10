@@ -6,11 +6,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 #[cfg(test)]
 mod test {
-    use std::ffi::{CStr, CString};
-    use std::ptr;
-    use std::ptr::{null, null_mut};
-    use std::thread::sleep;
-    use std::time::Duration;
+    use std::ffi::{CStr};
     use super::*;
 
     #[test]
