@@ -2,13 +2,33 @@ use std::env;
 use std::path::PathBuf;
 use cmake::Config;
 
-fn main() {
-    let dst = Config::new("external/llama.cpp")
-        .build_target("preinstall")
+#[cfg(target_os = "macos")]
+fn make_config() -> Config {
+    let mut cfg = Config::new("external/llama.cpp");
+    cfg.build_target("preinstall")
         .define("BUILD_SHARED_LIBS", "true")
+        .define("LLAMA_METAL", "ON")
         .define("LLAMA_ACCELERATE", "true")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
+    .define("LLAMA_BUILD_TESTS", "OFF");
+    cfg
+}
+
+#[cfg(not(target_os = "macos"))]
+fn make_config() -> Config {
+    let mut cfg = Config::new("external/llama.cpp");
+    cfg.build_target("preinstall")
+        .define("BUILD_SHARED_LIBS", "true")
+        .define("LLAMA_ACCELERATE", "true")
+        .define("LLAMA_BUILD_EXAMPLES", "OFF")
+        .define("LLAMA_BUILD_TESTS", "OFF");
+    cfg
+}
+
+fn main() {
+    let mut config = make_config();
+    let dst = config
         .very_verbose(true)
         .build();
 

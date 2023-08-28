@@ -1,107 +1,156 @@
 use llama_cpp_sys::*;
-use rand::Rng;
-use std::ffi::{CStr, CString};
 use std::io::Write;
-use std::ptr;
-use std::ptr::null_mut;
+use rand::Rng;
+use std::ffi::{c_char, CStr, CString};
+use std::process::exit;
+use std::env;
+use std::io::stdout;
 
+/// Based on: https://github.com/ggerganov/llama.cpp/blob/master/examples/simple/simple.cpp
 #[test]
 pub fn main() {
+    config_env();
     unsafe {
-        let mut rng = rand::thread_rng();
-        let mut params = llama_context_default_params();
-        params.seed = rng.gen::<i32>();
-        params.n_ctx = 512;
-        params.n_parts = -1;
-        params.f16_kv = true;
-        params.use_mlock = false;
-        params.vocab_only = false;
-        params.logits_all = false;
-        params.embedding = false;
-        params.progress_callback = None;
+        llama_backend_init(true);
 
-        let model_path = CString::new("models/13B/model.bin").unwrap();
-        let ctx = llama_init_from_file(model_path.as_ptr(), params);
-        assert_ne!(ctx, null_mut());
-        println!("loaded model");
+        let mut ctx_params = llama_context_default_params();
+        ctx_params.n_batch = 64;
+        ctx_params.n_gpu_layers = 16;
+        ctx_params.n_ctx = 1024;
 
-        let prompt = " hello, my name is dave and I live in Oz. Where do I live?";
-        let c_prompt = CString::new(prompt).unwrap();
-        let c_prompt_bytes = c_prompt.as_bytes_with_nul();
-        let c_prompt_ptr = &c_prompt_bytes[0] as *const u8 as *const i8;
+        let model_path = "models/codellama-13b-instruct.Q5_K_M.gguf";
+        let model_path_cstr = make_c_str(model_path);
+        let model = llama_load_model_from_file(model_path_cstr.as_ptr(), ctx_params);
 
-        let mut embd_inp: Vec<llama_token> = vec![0; prompt.len() + 1];
-        let embd_inp_ptr: *mut i32 = &mut embd_inp[0] as *mut i32;
-        let embd_inp_len = embd_inp.len() as i32;
-        let prompt_token_count = llama_tokenize(ctx, c_prompt_ptr, embd_inp_ptr, embd_inp_len, true);
-        assert!(prompt_token_count > 0);
-        embd_inp.truncate(prompt_token_count as usize);
-        println!("prompt length: {}", prompt_token_count);
-
-        let n_ctx = llama_n_ctx(ctx);
-        println!("model context length: {}", n_ctx);
-
-        let mut token_stream = embd_inp.clone();
-        let num_predict = 128;
-        assert!(num_predict + token_stream.len() < n_ctx as usize);
-
-        println!("prompt:");
-        for token in token_stream.iter() {
-            let c_buf = llama_token_to_str(ctx, *token);
-            let c_str: &CStr = CStr::from_ptr(c_buf);
-            let str_slice: &str = c_str.to_str().unwrap();
-            print!("{}", str_slice);
+        if model.is_null() {
+            println!("error: failed to load model");
+            exit(1);
         }
-        println!("\n\ngenerating...\n");
 
-        let sample_worker_threads = 8;
-        let sample_size = 64;
-        let mut gen_buffer = vec![0; sample_size];
+        let prompt_str = make_c_str("### Instruction:\n Respond in structured JSON. What functions would you need to implement for a raytracer?\n### Response:");
+        let ctx = llama_new_context_with_model(model, ctx_params);
+        let mut tokens_list: Vec<llama_token> = vec![0; 2048];
+        let mut used_length = llama_tokenize(ctx, prompt_str.as_ptr(), tokens_list.as_mut_ptr(), tokens_list.len() as i32, true) as usize;
 
-        // Initialize with prompt
-        let eval_result = llama_eval(ctx, token_stream.as_ptr(), token_stream.len() as i32, 0, sample_worker_threads);
-        assert_eq!(eval_result, 0);
+        let max_context_size = llama_n_ctx(ctx);
+        let max_tokens_list_size = (max_context_size - 4).max(0) as usize;
 
-        for _ in 0..num_predict {
-            let top_k = 40;
-            let top_p = 0.95f32;
-            let temp = 0.8f32;
-            let repeat_penalty = 1.1f32;
+        if used_length > max_tokens_list_size {
+            println!("error: prompt too long ({} tokens, max {})", used_length, max_tokens_list_size);
+            exit(1);
+        }
 
-            // Build a query buffer
-            let gen_buffer_ptr = gen_buffer.as_mut_ptr();
-            ptr::write_bytes(gen_buffer_ptr, 0, gen_buffer.len());
-            if token_stream.len() < sample_size {
-                let end_partial = &mut gen_buffer[sample_size - token_stream.len()..];
-                end_partial.copy_from_slice(&token_stream);
-            } else {
-                gen_buffer.copy_from_slice(&token_stream[(token_stream.len() - sample_size)..])
+        let mut token_value_buffer: Vec<c_char> = vec![0; 2048];
+        let used_tokens = &tokens_list[0..used_length];
+        for token in used_tokens.iter() {
+            print_c_str(*token, &mut token_value_buffer, ctx);
+        }
+
+        // main loop
+
+        // The LLM keeps a contextual cache memory of previous token evaluation.
+        // Usually, once this cache is full, it is required to recompute a compressed context based on previous
+        // tokens (see "infinite text generation via context swapping" in the main example), but in this minimalist
+        // example, we will just stop the loop once this cache is full or once an end of stream is detected.
+        let n_gen = max_context_size.max(32);
+        println!("\n ... generating {} tokens...\n", n_gen);
+
+        let n_vocab = llama_n_vocab(ctx);
+        let mut candidates: Vec<llama_token_data> = Vec::with_capacity(n_vocab as usize);
+
+        let token_history_max_length = 2048;
+        let mut token_history: Vec<llama_token> = Vec::new();
+
+        while llama_get_kv_cache_token_count(ctx) < n_gen {
+            // Use all generated tokens as context for next token
+            let existing_token_count = llama_get_kv_cache_token_count(ctx);
+
+            let used_tokens = &tokens_list[0..used_length];
+            let result_code = llama_eval(ctx, used_tokens.as_ptr(), used_length as i32, existing_token_count, 8);
+            if result_code == 1 {
+                println!("eval failed");
+                exit(1);
             }
 
-            // Invoke model
-            let last_real_token = &gen_buffer[gen_buffer.len() - 1] as *const i32;
-            let num_tokens_to_generate = 1;
-            let past_tokens = token_stream.len() as i32;
-            let eval_result = llama_eval(ctx, last_real_token, num_tokens_to_generate, past_tokens, sample_worker_threads);
-            assert_eq!(eval_result, 0);
+            tokens_list.clear();
+            used_length = 0;
 
-            // Sample result
-            let id = llama_sample_top_p_top_k(ctx, gen_buffer_ptr, sample_size as i32, top_k, top_p, temp, repeat_penalty);
+            // sample the next token
+            let mut new_token_id: llama_token = 0;
+            let logits = llama_get_logits(ctx);
 
-            if id == llama_token_eos() {
-                println!("Received end of stream");
+            candidates.clear();
+            for token_id in 0..n_vocab {
+                candidates.push(llama_token_data {
+                    id: token_id,
+                    logit: *logits.offset(token_id as isize),
+                    p: 0f32,
+                });
+            }
+
+            let mut candidates_p = llama_token_data_array {
+                data: candidates.as_mut_ptr(),
+                size: candidates.len(),
+                sorted: false,
+            };
+
+            let repeat_penalty_scan_length = token_history_max_length.min(token_history.len());
+            let repeat_penalty_factor = 1.1f32;
+            llama_sample_repetition_penalty(
+                ctx,
+                &mut candidates_p,
+                token_history.as_ptr(),
+                repeat_penalty_scan_length, 
+                repeat_penalty_factor
+            );
+
+            new_token_id = llama_sample_token_greedy(ctx, &mut candidates_p);
+
+            // is it an end of stream ?
+            if new_token_id == llama_token_eos(ctx) {
+                println!("[end of text]");
                 break;
             }
 
-            let c_buf = llama_token_to_str(ctx, id);
-            let c_str: &CStr = CStr::from_ptr(c_buf);
-            if let Ok(str_slice) = c_str.to_str() {
-                token_stream.push(id);
-                print!("{}", str_slice);
-                std::io::stdout().flush().unwrap();
+            // print the new token :
+            print_c_str(new_token_id, &mut token_value_buffer, ctx);
+
+            // push this new token for next evaluation
+            tokens_list.push(new_token_id);
+            used_length += 1;
+
+            token_history.push(new_token_id);
+            if token_history.len() > token_history_max_length {
+                token_history.remove(0);
             }
         }
 
-        println!("\n");
+        llama_free(ctx);
+        llama_free_model(model);
+
+        llama_backend_free();
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn config_env() {
+}
+
+#[cfg(target_os = "macos")]
+fn config_env() {
+  // Current implementation needs an external file with the kernel in it.
+  env::set_var("LLAMA_METAL_KERNEL", "external/llama.cpp/ggml-metal.metal");
+}
+
+fn make_c_str(value: &str) -> CString {
+    CString::new(value).unwrap()
+}
+
+unsafe fn print_c_str(token_id: llama_token, buffer: &mut Vec<c_char>, ctx: *const llama_context) {
+    buffer.fill(0);
+    llama_token_to_piece(ctx, token_id, buffer.as_mut_ptr(), buffer.len() as i32);
+    let c_str = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+    let str_slice: &str = c_str.to_str().unwrap();
+    print!("{}", str_slice);
+    stdout().flush().unwrap();
 }

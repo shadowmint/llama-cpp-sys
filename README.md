@@ -6,7 +6,7 @@ For a higher-level API, see https://github.com/shadowmint/llama-cpp-rs
 
 ## Build
 
-    git submodule init --update
+    git submodule update --init
     cargo build
 
 ## Run example
