@@ -4,9 +4,12 @@ This is a binding of [llama.cpp](https://github.com/ggerganov/llama.cpp) for rus
 
 For a higher-level API, see https://github.com/shadowmint/llama-cpp-rs
 
+This repo vendors the llama-cpp source code because they keep changing. :|
+
+The current version of the library is using: `103cfafc774f6feb3172b5d4d39681c965b17eba`
+
 ## Build
 
-    git submodule update --init
     cargo build
 
 ## Run example
