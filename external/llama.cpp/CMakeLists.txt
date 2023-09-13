@@ -121,8 +121,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         DEPENDS "${GIT_DIR}/index"
         VERBATIM
     )
-else()
-    message(WARNING "Git repository not found; to enable automatic generation of build info, make sure Git is installed and the project is a Git repository.")
 endif()
 
 #
