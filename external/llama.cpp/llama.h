@@ -10,6 +10,7 @@
 #endif // GGML_USE_CUBLAS
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdbool.h>
 
 #ifdef LLAMA_SHARED
@@ -163,6 +164,7 @@ extern "C" {
         enum llama_ftype ftype;      // quantize to this llama_ftype
         bool allow_requantize;       // allow quantizing non-f32/f16 tensors
         bool quantize_output_tensor; // quantize output.weight
+        bool only_copy;              // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
     } llama_model_quantize_params;
 
     // grammar types
@@ -243,15 +245,17 @@ extern "C" {
     LLAMA_API bool llama_mmap_supported (void);
     LLAMA_API bool llama_mlock_supported(void);
 
-    LLAMA_API int llama_n_vocab(const struct llama_context * ctx);
-    LLAMA_API int llama_n_ctx  (const struct llama_context * ctx);
-    LLAMA_API int llama_n_embd (const struct llama_context * ctx);
+    LLAMA_API int llama_n_vocab    (const struct llama_context * ctx);
+    LLAMA_API int llama_n_ctx      (const struct llama_context * ctx);
+    LLAMA_API int llama_n_ctx_train(const struct llama_context * ctx);
+    LLAMA_API int llama_n_embd     (const struct llama_context * ctx);
 
     LLAMA_API enum llama_vocab_type llama_vocab_type(const struct llama_context * ctx);
 
-    LLAMA_API int llama_model_n_vocab(const struct llama_model * model);
-    LLAMA_API int llama_model_n_ctx  (const struct llama_model * model);
-    LLAMA_API int llama_model_n_embd (const struct llama_model * model);
+    LLAMA_API int llama_model_n_vocab    (const struct llama_model * model);
+    LLAMA_API int llama_model_n_ctx      (const struct llama_model * model);
+    LLAMA_API int llama_model_n_ctx_train(const struct llama_model * model);
+    LLAMA_API int llama_model_n_embd     (const struct llama_model * model);
 
     // Get a string describing the model type
     LLAMA_API int llama_model_desc(const struct llama_model * model, char * buf, size_t buf_size);
@@ -408,6 +412,8 @@ extern "C" {
 
     LLAMA_API void llama_grammar_free(struct llama_grammar * grammar);
 
+    LLAMA_API struct llama_grammar * llama_grammar_copy(const struct llama_grammar * grammar);
+
     //
     // Sampling functions
     //
@@ -496,7 +502,7 @@ extern "C" {
     // Type of pointer to the beam_search_callback function.
     // void* callback_data is any custom data passed to llama_beam_search, that is subsequently
     // passed back to beam_search_callback. This avoids having to use global variables in the callback.
-    typedef void (*llama_beam_search_callback_fn_t)(void * callback_data, llama_beams_state);
+    typedef void (*llama_beam_search_callback_fn_t)(void * callback_data, struct llama_beams_state);
 
     /// @details Deterministically returns entire sentence constructed by a beam search.
     /// @param ctx Pointer to the llama_context.
@@ -519,6 +525,8 @@ extern "C" {
     // Set callback for all future logging events.
     // If this is not called, or NULL is supplied, everything is output on stderr.
     LLAMA_API void llama_log_set(llama_log_callback log_callback, void * user_data);
+
+    LLAMA_API void llama_dump_timing_info_yaml(FILE * stream, const struct llama_context * ctx);
 
 #ifdef __cplusplus
 }

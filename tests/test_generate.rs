@@ -1,24 +1,20 @@
 use llama_cpp_sys::*;
-use std::io::Write;
 use rand::Rng;
 use std::ffi::{c_char, CStr, CString};
 use std::process::exit;
 use std::env;
-use std::io::stdout;
 
 /// Based on: https://github.com/ggerganov/llama.cpp/blob/master/examples/simple/simple.cpp
 #[test]
 pub fn main() {
-    config_env();
     unsafe {
         llama_backend_init(true);
 
         let mut ctx_params = llama_context_default_params();
-        ctx_params.n_batch = 64;
-        ctx_params.n_gpu_layers = 16;
-        ctx_params.n_ctx = 1024;
+        ctx_params.n_batch = 512;
+        ctx_params.n_gpu_layers = 32;
 
-        let model_path = "models/codellama-13b-instruct.Q5_K_M.gguf";
+        let model_path = "models/model.gguf";
         let model_path_cstr = make_c_str(model_path);
         let model = llama_load_model_from_file(model_path_cstr.as_ptr(), ctx_params);
 
@@ -27,7 +23,7 @@ pub fn main() {
             exit(1);
         }
 
-        let prompt_str = make_c_str("### Instruction:\n Respond in structured JSON. What functions would you need to implement for a raytracer?\n### Response:");
+        let prompt_str = make_c_str("### Instruction:\nImplement the following code in typescript: ```### Instruction:\nThe following high level steps are required to implement a raytracing engine:\n### Response:");
         let ctx = llama_new_context_with_model(model, ctx_params);
         let mut tokens_list: Vec<llama_token> = vec![0; 2048];
         let mut used_length = llama_tokenize(ctx, prompt_str.as_ptr(), tokens_list.as_mut_ptr(), tokens_list.len() as i32, true) as usize;
@@ -58,7 +54,7 @@ pub fn main() {
         let n_vocab = llama_n_vocab(ctx);
         let mut candidates: Vec<llama_token_data> = Vec::with_capacity(n_vocab as usize);
 
-        let token_history_max_length = 2048;
+        let token_history_max_length = 128;
         let mut token_history: Vec<llama_token> = Vec::new();
 
         while llama_get_kv_cache_token_count(ctx) < n_gen {
@@ -132,16 +128,6 @@ pub fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn config_env() {
-}
-
-#[cfg(target_os = "macos")]
-fn config_env() {
-  // Current implementation needs an external file with the kernel in it.
-  env::set_var("LLAMA_METAL_KERNEL", "external/llama.cpp/ggml-metal.metal");
-}
-
 fn make_c_str(value: &str) -> CString {
     CString::new(value).unwrap()
 }
@@ -152,5 +138,4 @@ unsafe fn print_c_str(token_id: llama_token, buffer: &mut Vec<c_char>, ctx: *con
     let c_str = unsafe { CStr::from_ptr(buffer.as_ptr()) };
     let str_slice: &str = c_str.to_str().unwrap();
     print!("{}", str_slice);
-    stdout().flush().unwrap();
 }

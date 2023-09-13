@@ -1,1 +1,7 @@
-103cfafc774f6feb3172b5d4d39681c965b17eba
+commit b52b29ab9d601bb298050bcd2261169bc917ba2c
+Author: Eric Sommerlade <es0m@users.noreply.github.com>
+Date:   Wed Sep 13 02:54:20 2023 +0100
+
+    arm64 support for windows (#3007)
+    
+    Co-authored-by: Cebtenzzre <cebtenzzre@gmail.com>

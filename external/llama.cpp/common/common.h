@@ -4,12 +4,24 @@
 
 #include "llama.h"
 
+#define LOG_NO_FILE_LINE_FUNCTION
+#include "log.h"
+
 #include <string>
 #include <vector>
 #include <random>
 #include <thread>
 #include <unordered_map>
 #include <tuple>
+
+#ifdef _WIN32
+#define DIRECTORY_SEPARATOR '\\'
+#else
+#define DIRECTORY_SEPARATOR '/'
+#endif // _WIN32
+
+#define die(msg)          do { fputs("error: " msg "\n", stderr);                  exit(1); } while (0)
+#define die_fmt(fmt, ...) do { fprintf(stderr, "error: " fmt "\n", ##__VA_ARGS__); exit(1); } while (0)
 
 //
 // CLI argument parsing
@@ -23,8 +35,9 @@ struct gpt_params {
     int32_t n_ctx                           = 512;  // context size
     int32_t n_batch                         = 512;  // batch size for prompt processing (must be >=32 to use BLAS)
     int32_t n_keep                          = 0;    // number of tokens to keep from initial prompt
+    int32_t n_draft                         = 16;   // number of tokens to draft during speculative decoding
     int32_t n_chunks                        = -1;   // max number of chunks to process (-1 = unlimited)
-    int32_t n_gpu_layers                    = 0;    // number of layers to store in VRAM
+    int32_t n_gpu_layers                    = -1;   // number of layers to store in VRAM (-1 - use default)
     int32_t main_gpu                        = 0;    // the GPU that is used for scratch and small tensors
     float   tensor_split[LLAMA_MAX_DEVICES] = {0};  // how split tensors should be distributed across GPUs
     int32_t n_probs                         = 0;    // if greater than 0, output the probabilities of top n_probs tokens.
@@ -54,6 +67,7 @@ struct gpt_params {
     float       cfg_scale         = 1.f;   // How strong is guidance
 
     std::string model             = "models/7B/ggml-model-f16.gguf"; // model path
+    std::string model_draft       = "";                              // draft model for speculative decoding
     std::string model_alias       = "unknown"; // model alias
     std::string prompt            = "";
     std::string path_prompt_cache = "";  // path to file for saving/loading prompt eval state
@@ -61,6 +75,7 @@ struct gpt_params {
     std::string input_suffix      = "";  // string to suffix user inputs with
     std::string grammar           = "";  // optional BNF-like grammar to constrain sampling
     std::vector<std::string> antiprompt; // string upon seeing which more user input is prompted
+    std::string logdir            = "";  // directory in which to save YAML log files
 
     std::string lora_adapter = "";  // lora adapter path
     std::string lora_base    = "";  // base model path for the lora adapter
@@ -82,6 +97,7 @@ struct gpt_params {
     bool prompt_cache_ro   = false; // open the prompt cache read-only and do not update it
 
     bool embedding         = false; // get only sentence embedding
+    bool escape            = false; // escape "\n", "\r", "\t", "\'", "\"", and "\\"
     bool interactive_first = false; // wait for user input immediately
     bool multiline_input   = false; // reverse the usage of `\`
     bool simple_io         = false; // improves compatibility with subprocesses and limited consoles
@@ -144,3 +160,47 @@ std::string llama_detokenize_spm(
 std::string llama_detokenize_bpe(
                          llama_context * ctx,
         const std::vector<llama_token> & tokens);
+
+//
+// Sampling utils
+//
+
+// this is a common sampling function used across the examples for convenience
+// it can serve as a starting point for implementing your own sampling function
+//
+// required:
+//  - ctx:    context to use for sampling
+//  - params: sampling parameters
+//
+// optional:
+//  - ctx_guidance:  context to use for classifier-free guidance, ignore if NULL
+//  - grammar:       grammar to use for sampling, ignore if NULL
+//  - last_tokens:   needed for repetition penalty, ignore if empty
+//  - idx:           sample from llama_get_logits(ctx) + idx * n_vocab
+//
+// returns:
+//  - token:      sampled token
+//  - candidates: vector of candidate tokens
+//
+llama_token llama_sample_token(
+                  struct llama_context * ctx,
+                  struct llama_context * ctx_guidance,
+                  struct llama_grammar * grammar,
+               const struct gpt_params & params,
+        const std::vector<llama_token> & last_tokens,
+         std::vector<llama_token_data> & candidates,
+                                   int   idx = 0);
+
+//
+// YAML utils
+//
+
+bool create_directory_with_parents(const std::string & path);
+void dump_vector_float_yaml(FILE * stream, const char * prop_name, const std::vector<float> & data);
+void dump_vector_int_yaml(FILE * stream, const char * prop_name, const std::vector<int> & data);
+void dump_string_yaml_multiline(FILE * stream, const char * prop_name, const char * data);
+std::string get_sortable_timestamp();
+
+void dump_non_result_info_yaml(
+    FILE * stream, const gpt_params & params, const llama_context * lctx,
+    const std::string & timestamp, const std::vector<int> & prompt_tokens, const char * model_desc);
