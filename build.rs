@@ -23,6 +23,11 @@ fn make_config() -> Config {
         .define("LLAMA_ACCELERATE", "true")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF");
+
+    if env::var("CARGO_FEATURE_CUBLAS").is_ok() {
+        cfg.define("LLAMA_CUBLAS", "ON");
+    }
+
     cfg
 }
 

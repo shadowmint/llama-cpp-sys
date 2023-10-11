@@ -8,6 +8,11 @@ For a higher-level API, see https://github.com/shadowmint/llama-cpp-rs
 
     cargo build
 
+### Features
+
+- `cublas`: Build with cublas support. Nvidia-toolkit must be installed
+
+
 ## Run example
 
 Put your models in the `models` folder; the test expects a file in the path:
