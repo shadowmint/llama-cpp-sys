@@ -1,7 +1,0 @@
-commit 87c91c07663b707e831c59ec373b5e665ff9d64a
-Author: Georgi Gerganov <ggerganov@gmail.com>
-Date:   Wed Feb 28 21:44:21 2024 +0200
-
-    ci : reduce 3b ppl chunks to 1 to avoid timeout (#5771)
-    
-    ggml-ci
