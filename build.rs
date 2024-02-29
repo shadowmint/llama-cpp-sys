@@ -11,6 +11,8 @@ fn make_config() -> Config {
         .define("LLAMA_ACCELERATE", "true")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
+        // avoids `GGML_METAL_PATH_RESOURCES` environment variable
+        .define("LLAMA_METAL_EMBED_LIBRARY", "ON")
     .define("LLAMA_BUILD_TESTS", "OFF");
     cfg
 }

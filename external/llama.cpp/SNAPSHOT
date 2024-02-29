@@ -1,7 +1,7 @@
-commit b52b29ab9d601bb298050bcd2261169bc917ba2c
-Author: Eric Sommerlade <es0m@users.noreply.github.com>
-Date:   Wed Sep 13 02:54:20 2023 +0100
+commit 87c91c07663b707e831c59ec373b5e665ff9d64a
+Author: Georgi Gerganov <ggerganov@gmail.com>
+Date:   Wed Feb 28 21:44:21 2024 +0200
 
-    arm64 support for windows (#3007)
+    ci : reduce 3b ppl chunks to 1 to avoid timeout (#5771)
     
-    Co-authored-by: Cebtenzzre <cebtenzzre@gmail.com>
+    ggml-ci

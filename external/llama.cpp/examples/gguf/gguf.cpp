@@ -1,5 +1,4 @@
 #include "ggml.h"
-#include "llama.h"
 
 #include <cstdio>
 #include <cinttypes>
@@ -13,14 +12,14 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-template<typename T>
+template <typename T>
 static std::string to_string(const T & val) {
     std::stringstream ss;
     ss << val;
     return ss.str();
 }
 
-bool gguf_ex_write(const std::string & fname) {
+static bool gguf_ex_write(const std::string & fname) {
     struct gguf_context * ctx = gguf_init_empty();
 
     gguf_set_val_u8  (ctx, "some.parameter.uint8",    0x12);
@@ -85,7 +84,7 @@ bool gguf_ex_write(const std::string & fname) {
 }
 
 // just read tensor info
-bool gguf_ex_read_0(const std::string & fname) {
+static bool gguf_ex_read_0(const std::string & fname) {
     struct gguf_init_params params = {
         /*.no_alloc = */ false,
         /*.ctx      = */ NULL,
@@ -143,7 +142,7 @@ bool gguf_ex_read_0(const std::string & fname) {
 }
 
 // read and create ggml_context containing the tensors and their data
-bool gguf_ex_read_1(const std::string & fname) {
+static bool gguf_ex_read_1(const std::string & fname) {
     struct ggml_context * ctx_data = NULL;
 
     struct gguf_init_params params = {
@@ -195,7 +194,7 @@ bool gguf_ex_read_1(const std::string & fname) {
 
             struct ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
 
-            printf("%s: tensor[%d]: n_dims = %d, name = %s, data = %p\n", __func__, i, cur->n_dims, cur->name, cur->data);
+            printf("%s: tensor[%d]: n_dims = %d, name = %s, data = %p\n", __func__, i, ggml_n_dims(cur), cur->name, cur->data);
 
             // print first 10 elements
             const float * data = (const float *) cur->data;
