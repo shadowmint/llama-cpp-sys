@@ -1,87 +1,122 @@
+use core::slice;
 use llama_cpp_sys::*;
-use rand::Rng;
-use std::ffi::{c_char, CStr, CString};
-use std::process::exit;
-use std::env;
+use std::{
+    ffi::{CStr, CString},
+    io::{stdout, Write},
+};
 
-/// Based on: https://github.com/ggerganov/llama.cpp/blob/master/examples/simple/simple.cpp
+const BATCH_TOKENS: usize = 512;
+const N_LEN: i32 = 32;
+
+/// Adapted from: https://github.com/ggerganov/llama.cpp/blob/master/examples/simple/simple.cpp
 #[test]
-pub fn main() {
+pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Prompt
+
+    const PROMPT:&str = "Do you like green eggs and ham?";
+
+    // Global init
+
     unsafe {
-        llama_backend_init(true);
+        llama_backend_init();
+        llama_numa_init(ggml_numa_strategy_GGML_NUMA_STRATEGY_DISABLED);
+    }
 
-        let mut ctx_params = llama_context_default_params();
-        ctx_params.n_batch = 512;
-        ctx_params.n_gpu_layers = 32;
+    // Init model
 
-        let model_path = "models/model.gguf";
-        let model_path_cstr = make_c_str(model_path);
-        let model = llama_load_model_from_file(model_path_cstr.as_ptr(), ctx_params);
+    let model_params = unsafe { llama_model_default_params() };
+    let model_name = CString::new("models/model.gguf").unwrap();
+    let model = unsafe { llama_load_model_from_file(model_name.as_ptr(), model_params) };
+    if model.is_null() {
+        return Err(format!("error: unable to load model: {}", model_name.to_str().unwrap()).into());
+    }
 
-        if model.is_null() {
-            println!("error: failed to load model");
-            exit(1);
-        }
+    // Init context
 
-        let prompt_str = make_c_str("### Instruction:\nImplement the following code in typescript: ```### Instruction:\nThe following high level steps are required to implement a raytracing engine:\n### Response:");
-        let ctx = llama_new_context_with_model(model, ctx_params);
-        let mut tokens_list: Vec<llama_token> = vec![0; 2048];
-        let mut used_length = llama_tokenize(ctx, prompt_str.as_ptr(), tokens_list.as_mut_ptr(), tokens_list.len() as i32, true) as usize;
+    let mut ctx_params = unsafe { llama_context_default_params() };
 
-        let max_context_size = llama_n_ctx(ctx);
-        let max_tokens_list_size = (max_context_size - 4).max(0) as usize;
+    ctx_params.seed = 1234;
+    ctx_params.n_ctx = 2048;
+    ctx_params.n_threads = 8;
+    ctx_params.n_threads_batch = 8;
 
-        if used_length > max_tokens_list_size {
-            println!("error: prompt too long ({} tokens, max {})", used_length, max_tokens_list_size);
-            exit(1);
-        }
+    let ctx = unsafe { llama_new_context_with_model(model, ctx_params) };
+    if ctx.is_null() {
+        return Err("error: unable to create model context".into());
+    }
 
-        let mut token_value_buffer: Vec<c_char> = vec![0; 2048];
-        let used_tokens = &tokens_list[0..used_length];
-        for token in used_tokens.iter() {
-            print_c_str(*token, &mut token_value_buffer, ctx);
-        }
+    // Tokenize the prompt
 
-        // main loop
+    let mut tokens_list = tokenize(model, PROMPT, true);
 
-        // The LLM keeps a contextual cache memory of previous token evaluation.
-        // Usually, once this cache is full, it is required to recompute a compressed context based on previous
-        // tokens (see "infinite text generation via context swapping" in the main example), but in this minimalist
-        // example, we will just stop the loop once this cache is full or once an end of stream is detected.
-        let n_gen = max_context_size.max(32);
-        println!("\n ... generating {} tokens...\n", n_gen);
+    // Make sure the KV cache is big enough to hold the prompt and generated tokens
 
-        let n_vocab = llama_n_vocab(ctx);
-        let mut candidates: Vec<llama_token_data> = Vec::with_capacity(n_vocab as usize);
+    let n_ctx = unsafe { llama_n_ctx(ctx) };
+    let n_kv_req = tokens_list.len() + (N_LEN as usize - tokens_list.len());
 
-        let token_history_max_length = 128;
-        let mut token_history: Vec<llama_token> = Vec::new();
+    println!("n_len = {N_LEN}, n_ctx = {n_ctx}, n_kv_req = {n_kv_req}");
 
-        while llama_get_kv_cache_token_count(ctx) < n_gen {
-            // Use all generated tokens as context for next token
-            let existing_token_count = llama_get_kv_cache_token_count(ctx);
+    // Make sure the KV cache is big enough to hold all the prompt and generated tokens
 
-            let used_tokens = &tokens_list[0..used_length];
-            let result_code = llama_eval(ctx, used_tokens.as_ptr(), used_length as i32, existing_token_count, 8);
-            if result_code == 1 {
-                println!("eval failed");
-                exit(1);
-            }
+    if n_kv_req > n_ctx.try_into().unwrap() {
+        return Err(format!("error: n_kv_req > n_ctx, the required KV cache size is not big enough. Either reduce n_len or increase n_ctx.").into());
+    }
 
-            tokens_list.clear();
-            used_length = 0;
+    // Print the prompt token-by-token.
 
-            // sample the next token
-            let mut new_token_id: llama_token = 0;
-            let logits = llama_get_logits(ctx);
+    print!("\n");
 
-            candidates.clear();
-            for token_id in 0..n_vocab {
-                candidates.push(llama_token_data {
-                    id: token_id,
-                    logit: *logits.offset(token_id as isize),
-                    p: 0f32,
-                });
+    for &token in &tokens_list {
+        print!("{}", token_to_piece(token, model));
+    }
+
+    stdout().flush().unwrap();
+
+    // Create a llama_batch with size 512. We use this object to submit
+    // token data for decoding.
+    let mut batch = unsafe { llama_batch_init(BATCH_TOKENS as i32, 0, 1) };
+
+    // Evaluate the initial prompt
+    for (pos, &token) in tokens_list.iter().enumerate() {
+        llama_batch_add(&mut batch, token, pos, false);
+    }
+
+    // llama_decode will output logits only for the last token of the prompt
+    // (add the last token with logits = true)
+    {
+        let logits = unsafe {
+            slice::from_raw_parts_mut(batch.logits, BATCH_TOKENS)
+        };
+
+        logits[usize::try_from(batch.n_tokens - 1).unwrap()] = 1;
+    }
+
+    if unsafe { llama_decode(ctx, batch) } != 0 {
+        return Err("llama_decode failed".try_into().unwrap());
+    }
+
+    // Main loop
+    let n_vocab = unsafe { llama_n_vocab(model) };
+    let mut n_cur = batch.n_tokens;
+    let mut n_decode = 0;
+    let mut candidates: Vec<llama_token_data> = (0..n_vocab)
+        .map(|token_id| llama_token_data {
+            id: token_id,
+            logit: 0.0,
+            p: 0.0,
+        })
+        .collect();
+    let eos = unsafe { llama_token_eos(model) };
+
+    while n_cur <= N_LEN {
+        // Sample the next token
+        {
+            let logits = unsafe { slice::from_raw_parts(llama_get_logits_ith(ctx, batch.n_tokens - 1), n_vocab as usize) };
+
+            for (token_id, candidate) in candidates.iter_mut().enumerate() {
+                candidate.id = token_id.try_into().unwrap();
+                candidate.logit = logits[token_id];
+                candidate.p = 0.0;
             }
 
             let mut candidates_p = llama_token_data_array {
@@ -90,52 +125,150 @@ pub fn main() {
                 sorted: false,
             };
 
-            let repeat_penalty_scan_length = token_history_max_length.min(token_history.len());
-            let repeat_penalty_factor = 1.1f32;
-            llama_sample_repetition_penalty(
-                ctx,
-                &mut candidates_p,
-                token_history.as_ptr(),
-                repeat_penalty_scan_length, 
-                repeat_penalty_factor
-            );
+            // sample the most likely token
+            // Safety: Candidates outlives the call to this function.
+            let new_token_id: llama_token = unsafe { llama_sample_token_greedy(ctx, &mut candidates_p) };
 
-            new_token_id = llama_sample_token_greedy(ctx, &mut candidates_p);
+            tokens_list.push(new_token_id);
 
-            // is it an end of stream ?
-            if new_token_id == llama_token_eos(ctx) {
-                println!("[end of text]");
+            // is it the end of the stream?
+            if new_token_id == eos || n_cur == N_LEN {
                 break;
             }
 
-            // print the new token :
-            print_c_str(new_token_id, &mut token_value_buffer, ctx);
+            print!("{}", token_to_piece(new_token_id, model));
+            stdout().flush()?;
+
+            // prepare the next batch (llama_batch_clear does this)
+            batch.n_tokens = 0;
 
             // push this new token for next evaluation
-            tokens_list.push(new_token_id);
-            used_length += 1;
+            llama_batch_add(&mut batch, new_token_id, n_cur.try_into().unwrap(), true);
 
-            token_history.push(new_token_id);
-            if token_history.len() > token_history_max_length {
-                token_history.remove(0);
-            }
+            n_decode += 1;
         }
 
+        n_cur += 1;
+
+        // evaluate the current batch wih the transformer model
+        let ret = unsafe { llama_decode(ctx, batch) };
+        if ret != 0 {
+            return Err(format!("Failed to eval, return code {ret}").into());
+        }
+    }
+
+    // Cleanup
+    unsafe {
+        llama_batch_free(batch);
         llama_free(ctx);
         llama_free_model(model);
-
         llama_backend_free();
+    }
+
+    // Check results (this should match the next part of the poem)
+    assert_eq!(&tokens_list, &[
+        1,
+        1938,
+        366,
+        763,
+        7933,
+        29808,
+        322,
+        16366,
+        29973,
+        13,
+        29902,
+        437,
+        451,
+        763,
+        963,
+        29892,
+        3685,
+        29899,
+        29902,
+        29899,
+        314,
+        29889,
+        13,
+        29902,
+        437,
+        451,
+        763,
+        7933,
+        29808,
+        322,
+        16366,
+        29889,
+        13,
+    ]);
+
+    Ok(())
+}
+
+/// Adapted from `llama.cpp/common/common.cpp`
+fn token_to_piece(token: llama_token, model: *const llama_model) -> String {
+    let mut buf = [0u8; 64];
+    let n_tokens = unsafe { llama_token_to_piece(model, token, buf.as_mut_ptr() as *mut i8, buf.len().try_into().unwrap()) };
+    buf[buf.len() - 1] = 0;
+    if n_tokens < 0 {
+        // should be unreachable
+        panic!("Token `{token}` piece longer than max chars (64).");
+    } else {
+        return CStr::from_bytes_until_nul(&buf).unwrap().to_str().unwrap().into();
     }
 }
 
-fn make_c_str(value: &str) -> CString {
-    CString::new(value).unwrap()
+/// Adapted from `llama.cpp/common/common.cpp`
+fn llama_batch_add(batch: &mut llama_batch, token: llama_token, pos: usize, logits: bool) {
+    assert!(batch.n_tokens <= BATCH_TOKENS as i32);
+
+    let n_tokens:usize = batch.n_tokens.try_into().unwrap();
+
+    unsafe {
+        slice::from_raw_parts_mut(batch.token, BATCH_TOKENS)[n_tokens] = token;
+        slice::from_raw_parts_mut(batch.pos, BATCH_TOKENS)[n_tokens] = pos.try_into().unwrap();
+        slice::from_raw_parts_mut(batch.n_seq_id, BATCH_TOKENS)[n_tokens] = 1;
+        let ids = slice::from_raw_parts_mut(batch.seq_id, BATCH_TOKENS)[n_tokens];
+        slice::from_raw_parts_mut(ids, 1)[0] = 0;
+        slice::from_raw_parts_mut(batch.logits, BATCH_TOKENS)[n_tokens] = logits as i8;
+    };
+
+    batch.n_tokens += 1;
 }
 
-unsafe fn print_c_str(token_id: llama_token, buffer: &mut Vec<c_char>, ctx: *const llama_context) {
-    buffer.fill(0);
-    llama_token_to_piece(ctx, token_id, buffer.as_mut_ptr(), buffer.len() as i32);
-    let c_str = unsafe { CStr::from_ptr(buffer.as_ptr()) };
-    let str_slice: &str = c_str.to_str().unwrap();
-    print!("{}", str_slice);
+/// Adapted from `llama.cpp/common/common.cpp`
+fn tokenize(model: *const llama_model, text: &str, add_bos: bool) -> Vec<llama_token> {
+    // upper limit for the number of tokens
+    let mut n_tokens: i32 = (text.as_bytes().len() + if add_bos { 1 } else { 0 }).try_into().unwrap();
+    let mut result = vec![0; n_tokens as usize];
+    n_tokens = unsafe {
+        llama_tokenize(
+            model,
+            text.as_bytes().as_ptr() as *const i8,
+            text.len().try_into().unwrap(),
+            result.as_mut_ptr(),
+            result.len().try_into().unwrap(),
+            add_bos,
+            false,
+        )
+    };
+    if n_tokens < 0 {
+        result.resize((-n_tokens).try_into().unwrap(), 0);
+        let check = unsafe {
+            llama_tokenize(
+                model,
+                text.as_bytes().as_ptr() as *const i8,
+                text.len().try_into().unwrap(),
+                result.as_mut_ptr(),
+                result.len().try_into().unwrap(),
+                add_bos,
+                false,
+            )
+        };
+        assert_eq!(check, n_tokens)
+    } else {
+        result.resize(n_tokens.try_into().unwrap(), 0);
+    }
+
+    result
 }
